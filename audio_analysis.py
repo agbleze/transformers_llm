@@ -1,9 +1,9 @@
 
 #%%
-import eval_type_backport
-from eval_type_backport import install_patch
+#import eval_type_backport
+#from eval_type_backport import install_patch
 
-install_patch()
+#install_patch()
 
 import base64
 from IPython.display import HTML
@@ -23,7 +23,20 @@ from qwen_omni_utils import process_mm_info
 import torch
 import urllib.request
 import time
+import matplotlib.pyplot as plt
 
+#%%
+
+def download_with_retry(url, out, tries=3, delay=2):
+    for i in range(tries):
+        try:
+            urllib.request.urlretrieve(url, out)
+            if os.path.getsize(out) > 0:
+                return
+        except Exception as e:
+            if i == tries -1:
+                raise
+            time.sleep(delay)
 #%%
 def inference_audio(audio_waveform, sampling_rate,
                     prompt, sys_prompt="You are a helpful assistant.",
@@ -31,7 +44,7 @@ def inference_audio(audio_waveform, sampling_rate,
                     model_id="Qwen/Qwen2.5-Omni-7B",
                     ):
     model = Qwen2_5OmniForConditionalGeneration.from_pretrained(model_id,
-                                                                torch_type="auto",
+                                                                torch_dtype="auto",
                                                                 device_map="auto",
                                             )
     processor = Qwen2_5OmniProcessor.from_pretrained(model_id)
@@ -64,3 +77,40 @@ def inference_audio(audio_waveform, sampling_rate,
                                       )
     return out_text
     
+    
+if __name__ == "__main__":
+    #%%
+    video_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2.5-Omni/music.mp4"
+    mp4_path = "audio_source.mp4"
+    wav_path = "audio_16k.wav"
+    
+    #download_with_retry(video_url, mp4_path)
+    
+    #%%
+    # cmd = ["ffmpeg", "-y", "-i", mp4_path, "-vn", "-ac", "1", "-ar", "16000",
+    #        "-f", "wav", wav_path
+    #        ]
+    # subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    audio_16k, sr = sf.read(wav_path, dtype="float32")
+    
+    #%%
+    S = librosa.feature.melspectrogram(y=audio_16k, sr=sr, n_fft=1024,
+                                       hop_length=256, n_mels=80
+                                       )
+    S_db = librosa.power_to_db(S, ref=np.max)
+    plt.figure(figsize=(8, 3))
+    librosa.display.specshow(S_db, x_axis="time", y_axis="mel",
+                             sr=sr, hop_length=256
+                             )
+    plt.title("Mel Spectrogram")
+    plt.colorbar(format="%+2.0f dB")
+    plt.tight_layout()
+    #%%
+    sys_prompt = "You analyze only the audio. Ignore visuals. Be concise."
+    prompt = "Identify the main instruments, tempo feel, time signature if clear, and likely genre in bullet points. Then explain why your answers."
+
+    response = inference_audio(audio_16k, sr, prompt, sys_prompt=sys_prompt)
+    print("Model Response:\n", response[0])
+    
+# %%
