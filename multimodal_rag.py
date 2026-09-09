@@ -208,4 +208,10 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 
 
+documents_images_v2 = SimpleDirectoryReader("./Qwen3").load_data()
+
+
+image = Image.open(documents_images_v2[15].image_path).convert("RGB")
+
+
 
