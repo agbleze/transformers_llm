@@ -208,10 +208,25 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 
 
+# load and find table data
 documents_images_v2 = SimpleDirectoryReader("./Qwen3").load_data()
 
 
-image = Image.open(documents_images_v2[15].image_path).convert("RGB")
+image_path = documents_images_v2[15].image_path
+
+image = Image.open(image_path).convert("RGB")
+plt.figure(figsize=(16, 9))
+plt.imshow(image)
+plt.axis("off")
+plt.show()
+
+
+image_prompt = """
+Please load the table data and output it in JSON format from the image.
+Try your best to extract the table data from the image.
+If you can't extract the table data, summarize the image instead.
+"""
+
 
 
 
