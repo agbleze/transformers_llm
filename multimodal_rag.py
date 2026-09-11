@@ -227,6 +227,76 @@ Try your best to extract the table data from the image.
 If you can't extract the table data, summarize the image instead.
 """
 
+with open(image_path, "rb") as f:
+    image_bytes = f.read()
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+response = client.chat.completions.create(
+    model="openrouter/free",
+    messages=[
+        {"role": "user",
+         "content": [
+             {"type": "text", "text": image_prompt.strip()},
+             {"type": "image_url",
+              "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+              }
+         ]}
+        
+    ],
+    max_tokens=1500
+    )
 
 
+print(response.choices[0].message.content)
 
+
+documents_images_v2_sorted = sorted(documents_images_v2, key=extract_page_number)
+
+N = 10
+documents_subset = documents_images_v2_sorted[:N]
+image_results = {}
+
+
+for idx, img_doc in enumerate(documents_subset, start=1):
+    print(f"Processing image {idx}/{N}: {img_doc.image_path}")
+    
+    try:
+        with open(img_doc.image_path, "rb") as f:
+            image_bytes = f.read()
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+            
+        messages = [
+            {"role": "user",
+             "content": [
+                 {"type": "text", "text": image_prompt.strip()},
+                 {"type": "image_url",
+                  "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                  }
+             ]}
+        ]
+        
+        response = client.chat.completions.create(
+            model="openrouter/free",
+            messages=messages,
+            max_tokens=1500
+        )
+        
+        result_text = response.choices[0].message.content
+        image_results[img_doc.image_path] = result_text
+        
+    except Exception as e:
+        print(f"Error on image {idx}/{N}: {img_doc.image_path}. Error: {e}")
+        continue
+print(f"\n Done processing {len(image_results)} out of {N} images.")
+
+
+text_docs = [
+    Document(text=str(image_results[image_path]),
+             metadata={"image_path": image_path}
+             )
+    for image_path in image_results
+]
+    
+    
+    
+client = qdrant_client.QdrantClient(path="qdrant_mm_db_Qwen3")
