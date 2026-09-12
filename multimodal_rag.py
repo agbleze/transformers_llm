@@ -402,3 +402,42 @@ def outputs_to_objects(outputs, img_size, id2label):
     return objects
 
 
+def detect_and_crop_save_table(file_path,
+                               cropped_table_directory = "./table_images/"
+                               ):
+    image = PILImage.open(file_path)
+    filename, _ = os.path.splitext(os.path.basename(file_path))
+    os.makedirs(cropped_table_directory, exist_ok=True)
+    pixel_values = detection_transform(image).unsequeeze(0).to(model.device)
+    
+    with torch.no_grad():
+        outputs = model(pixel_values)
+    id2label = model.config.id2label
+    id2label[len(id2label)] = "no object"
+    detected_tables = outputs_to_objects(outputs, image.size, id2label)
+    
+    print(f"number of tables detected {len(detected_tables)}")
+    
+    for idx, obj in enumerate(detected_tables):
+        cropped_table = image.crop(obj["bbox"])
+        cropped_table.save(os.path.join(cropped_table_directory, f"{filename}_{idx}.png"))
+        
+        
+def plot_images(image_paths):
+    images_shown = 0
+    plt.figure(figsize=(16, 9))
+    for img_path in image_paths:
+        if os.path.isfile(img_path):
+            image = PILImage.open(img_path)
+            plt.subplot(2, 3, images_shown + 1)
+            plt.imshow(image)
+            plt.xticks([])
+            plt.yticks([])
+            images_shown += 1
+            if images_shown >= 9:
+                break
+    plt.tight_layout()
+    plt.show()
+            
+            
+        
