@@ -300,3 +300,105 @@ text_docs = [
     
     
 client = qdrant_client.QdrantClient(path="qdrant_mm_db_Qwen3")
+
+llama_text_store = QdrantVectorStore(client=client,
+                                     collection_name="text_collection"
+                                     )
+
+storage_context = StorageContext.from_defaults(vector_store=llama_text_store)
+
+index = VectorStoreIndex.from_documents(text_docs, storage_context=storage_context)
+
+
+MAX_TOKENS = 50
+retriever_engine = index.as_retriever(similarity_top_k=3)
+retrieval_results = retriever_engine.retrieve("Compare Qwen2.5 with Qwen3")
+
+
+retrieved_image = []
+for res_node in retrieval_results:
+    display_source_node(res_node, source_length=1000)
+
+
+query_engine = index.as_query_engine()
+query_engine.query("Compare Qwen2.5 with Qwen3")
+
+
+#%%
+"""
+detect table boxes, crop them and save for further analysis
+"""
+
+class MaxResize(object):
+    def __init__(self, max_size: int = 800):
+        self.max_size = max_size
+        
+    def __call__(self, image: PILImage.Image):
+        width, height = image.size
+        current_max_size = max(width, height)
+        scale = self.max_size / current_max_size
+        resized_image = image.size((int(round(scale * width)), int(round(scale * height))))
+        return resized_image
+    
+
+detection_transform = transforms.Compose([MaxResize(800),
+                                          transforms.ToTensor(),
+                                          transforms.Normalize([0.485, 0.456, 0.406],
+                                                               [0.229, 0.224, 0.225]
+                                                               )
+                                          ]
+                                         )
+
+
+structure_transform = transforms.Compose([
+    MaxResize(1000),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
+])
+
+
+model = AutoModelForObjectDetection.from_pretrained(
+    "microsoft/table-transformer-detection",
+    revision="no_timm"
+).to("cuda" if torch.cuda.is_available() else "cpu")
+
+structure_model = AutoModelForObjectDetection.from_pretrained(
+    "microsoft/table-transformer-structure-recognition-v1.1-all"
+).to("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def box_cxcywh_to_xyxy(x: Tensor):
+    x_c, y_c, w, h = x.unbind(-1)
+    b = [(x_c - 0.5 * w), (y_c - 0.5 * h), (x_c + 0.5 * w), (y_c + 0.5 * h)]
+    return torch.stack(b, dim=1)
+
+
+def rescale_bboxes(out_bbox, size):
+    width, height = size
+    boxes = box_cxcywh_to_xyxy(out_bbox)
+    boxes = boxes * torch.tensor([width, height, width, height])
+    return boxes
+
+
+def outputs_to_objects(outputs, img_size, id2label):
+    m = outputs.logits.softmax(-1).max(-1)
+    pred_labels = list(m.indices.detach().cpu().numpy())[0]
+    pred_scores = list(m.values.detach().cpu().numpy())[0]
+    pred_bboxes = outputs["pred_boxes"].detach().cpu()[0]
+    pred_bboxes = [
+        elem.tolist() for elem in rescale_bboxes(pred_bboxes, img_size)
+    ]
+    objects = []
+    
+    for label, score, bbox in zip(pred_labels, pred_scores, pred_bboxes):
+        class_label = id2label[int(label)]
+        if class_label != "no object":
+            objects.append({"label". class_label,
+                            "score": float(score),
+                            "bbox": [float(elem) for elem in bbox],
+                            }
+                           )
+    return objects
+
+
