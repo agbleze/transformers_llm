@@ -1,4 +1,4 @@
-
+#%%
 import os
 import io
 import re
@@ -39,17 +39,48 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from typing import Tuple, Union, List, Dict, Any
 from decouple import config
 
+
+#%%
+from llama_index.core import Settings
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.embeddings.clip import ClipEmbedding
+from qdrant_client import QdrantClient, models
+
+
+#%%
+
+import shutil
+shutil.rmtree("qdrant_index", ignore_errors=True)
+print("Database cleared successfully!")
+
+#%%
+
+api_key = config("OPENROUTER_API_KEY")
+base_url = config("OPENROUTER_BASEURL")
+
+
+#%%
+
+Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+#%%
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 #%%
+
 pdf_url = "https://arxiv.org/pdf/2505.09388.pdf"
 pdf_filename = "Qwen3.pdf"
+
+"""
 
 subprocess.run(["wget", "--user-agent", "Mozilla",
                 pdf_url, "-O", pdf_filename
                 ], check=True
                )
 
+"""
+
+#%%
 os.path.exists(pdf_filename)
 
 
@@ -61,6 +92,7 @@ output_dir = uploaded_pdf_path.stem
 output_path = Path(f"{output_dir}")
 output_path.mkdir(parents=True, exist_ok=True)
 
+#%%
 
 pdf_document = fitz.open(str(uploaded_pdf_path))
 total_pages = pdf_document.page_count
@@ -78,8 +110,10 @@ pdf_document.close()
 
 image_paths_sorted = sorted(output_path.glob("page_*.png"))
 
-
+#%%
 def extract_page_number(path: Union[str, Path]) -> Union[int, float]:
+    if isinstance(path, ImageDocument):
+        path = path.image_path or path.metadata.get("file_path")
     path = Path(path)
     match = re.search(f"page_(\d+)\.png", path.name)
     return int(match.group(1) if match else float("inf"))
@@ -87,7 +121,7 @@ def extract_page_number(path: Union[str, Path]) -> Union[int, float]:
 
 image_paths_sorted_numeric = sorted(image_paths_sorted, key=extract_page_number)
 
-
+#%%
 def plot_images(image_paths, title="Sample PDF Pages"):
     plt.figure(figsize=(16, 9))
     for idx, img_path in enumerate(image_paths[6:10]):
@@ -104,7 +138,7 @@ plot_images(image_paths_sorted_numeric, title="Pages 6 - 10 of Qwen3.pdf")
 
 
 
-# Plot 2 sample pages side by side at larger scale
+#%% Plot 2 sample pages side by side at larger scale
 def plot_two_pages(image_paths, title="Sample PDF Pages"):
     plt.figure(figsize=(16, 10))  # wider and taller
     for idx, img_path in enumerate(image_paths[:2]):  # just first 2 pages for example
@@ -120,13 +154,56 @@ def plot_two_pages(image_paths, title="Sample PDF Pages"):
 # Example: show pages 6 and 7 side by side
 plot_two_pages(image_paths_sorted_numeric[6:8], title="Pages 6 and 7 of Qwen3.pdf")
 
+#%% configure local text embedding model
+
+Settings.embed_model = HuggingFaceEmbedding(
+    model_name="BAAI/bge-small-en-v1.5",
+    device=device
+)
+
+#%% configure local image embedding model
+
+image_embed_model = ClipEmbedding(model_name="ViT-B/32",
+                                  device=device
+                                  )
 
 
-# loads the image files into ImageDocument objects for multimodal indexing
+#%% loads the image files into ImageDocument objects for multimodal indexing
 
 document_images = SimpleDirectoryReader("./Qwen3/").load_data()
 
+#%%
+
+
+#%%
+
+len(document_images)
+
+document_images[0].metadata.get("file_name")
+#%%
+
 client = qdrant_client.QdrantClient(path="qdrant_index")
+
+if not client.collection_exists("text_collection"):
+    client.create_collection(
+        collection_name="text_collection",
+        vectors_config=models.VectorParams(
+            size=384,  # Dimension size for BAAI/bge-small-en-v1.5
+            distance=models.Distance.COSINE
+        )
+    )
+    print("Created missing text_collection.")
+
+# 3. Check and manually create "image_collection" if missing
+if not client.collection_exists("image_collection"):
+    client.create_collection(
+        collection_name="image_collection",
+        vectors_config=models.VectorParams(
+            size=512,  # Dimension size for CLIP ViT-B/32
+            distance=models.Distance.COSINE
+        )
+    )
+    print("Created missing image_collection.")
 
 text_store = QdrantVectorStore(client=client,
                                 collection_name="text_collection"
@@ -137,18 +214,27 @@ storage_context = StorageContext.from_defaults(vector_store=text_store,
                                                image_store=image_store
                                                )
 
+
+#%%    
+#client.get_collection("image_collection").points_count
+
+
+#%%
 index = MultiModalVectorStoreIndex.from_documents(document_images,
-                                                  storage_context=storage_context
+                                                  storage_context=storage_context,
+                                                  image_embed_model=image_embed_model
                                                   )
+
+#%%
 
 retriever_engine = index.as_retriever(image_similarity_top_k=2)
 
-
+#%%
 query = "Compare Qwen2.5 and Qwen3."
 assert isinstance(retriever_engine, MultiModalVectorIndexRetriever)
 retrieval_results = retriever_engine.text_to_image_retrieve(query)
 
-
+#%%
 def plot_images(image_paths, title="Retrieved Images"):
     plt.figure(figsize=(15, 6))
     for idx, img_path in enumerate(image_paths[:10]):
@@ -161,21 +247,27 @@ def plot_images(image_paths, title="Retrieved Images"):
     plt.tight_layout()
     plt.show()
     
-    
+
+#%%   
 retrieved_images = []
 for res_node in retrieval_results:
-    if isinstance(res_node, ImageNode):
-        retrieved_images.append(res_node.node.metadata["file_path"])
+    node = res_node.node
+    if isinstance(node, ImageNode):
+        path = node.image_path or node.metadata.get("file_path")
+        if path:
+            retrieved_images.append(path)
     else:
         display_source_node(res_node, source_length=200)
-        
+
+
+#%%        
 plot_images(retrieved_images)
 
 
-
+#%%
 image_documents = [ImageDocument(image_path=image_path) for image_path in retrieved_images]
 
-
+#%%
 api_key = config("OPENROUTER_API_KEY")
 base_url = config("OPENROUTER_BASEURL")
 client = OpenAI(base_url=base_url, api_key=api_key)
@@ -194,21 +286,27 @@ messages = [
                  "url": f"data:image/png;base64, {base64.b64encode(open(img, 'rb').read()).decode()}"
              },
              }
-            for img in retrieved_images
+            for img in retrieved_images#[:3]
         ]
     }
 ]
 
+#%%
+
 response = client.chat.completions.create(
     model="openrouter/free",
     messages=messages,
-    max_tokens=512,
+    max_tokens=3000,
     )
 
+#%%
 print(response.choices[0].message.content)
 
+#%%
 
-# load and find table data
+print(response)
+
+#%% load and find table data
 documents_images_v2 = SimpleDirectoryReader("./Qwen3").load_data()
 
 
@@ -220,17 +318,19 @@ plt.imshow(image)
 plt.axis("off")
 plt.show()
 
-
+#%%
 image_prompt = """
 Please load the table data and output it in JSON format from the image.
 Try your best to extract the table data from the image.
 If you can't extract the table data, summarize the image instead.
 """
-
+#%%
 with open(image_path, "rb") as f:
     image_bytes = f.read()
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
+
+#%%
 response = client.chat.completions.create(
     model="openrouter/free",
     messages=[
@@ -243,17 +343,22 @@ response = client.chat.completions.create(
          ]}
         
     ],
-    max_tokens=1500
+    max_tokens=2500
     )
 
+#%%
+response.choices[0].finish_reason
 
-print(response.choices[0].message.content)
+#%%
+print(response.choices[0].message.reasoning)
 
-
+#%%  ################ Document table extraction and description   #############
 documents_images_v2_sorted = sorted(documents_images_v2, key=extract_page_number)
 
 N = 10
 documents_subset = documents_images_v2_sorted[:N]
+
+#%%
 image_results = {}
 
 
@@ -289,7 +394,7 @@ for idx, img_doc in enumerate(documents_subset, start=1):
         continue
 print(f"\n Done processing {len(image_results)} out of {N} images.")
 
-
+#%%
 text_docs = [
     Document(text=str(image_results[image_path]),
              metadata={"image_path": image_path}
@@ -297,11 +402,23 @@ text_docs = [
     for image_path in image_results
 ]
     
+#%% 
     
-    
-client = qdrant_client.QdrantClient(path="qdrant_mm_db_Qwen3")
+drant_client = qdrant_client.QdrantClient(path="qdrant_mm_db_Qwen3")
 
-llama_text_store = QdrantVectorStore(client=client,
+#%%
+from llama_index.llms.openai_like import OpenAILike
+
+#%%
+Settings.llm = OpenAILike(
+    model="openrouter/free",            
+    api_key=api_key,                    
+    api_base=base_url,
+    max_tokens=3000,
+    is_chat_model=True                  
+)
+#%%
+llama_text_store = QdrantVectorStore(client=drant_client,
                                      collection_name="text_collection"
                                      )
 
@@ -309,26 +426,34 @@ storage_context = StorageContext.from_defaults(vector_store=llama_text_store)
 
 index = VectorStoreIndex.from_documents(text_docs, storage_context=storage_context)
 
-
+#%%
 MAX_TOKENS = 50
 retriever_engine = index.as_retriever(similarity_top_k=3)
 retrieval_results = retriever_engine.retrieve("Compare Qwen2.5 with Qwen3")
 
-
+#%%
 retrieved_image = []
 for res_node in retrieval_results:
     display_source_node(res_node, source_length=1000)
 
-
+#%%
 query_engine = index.as_query_engine()
-query_engine.query("Compare Qwen2.5 with Qwen3")
 
+#%%
+query_response = query_engine.query("Compare Qwen2.5 with Qwen3")
 
+#%%
+
+query_response.response
+#%%
+
+query_response
 #%%
 """
 detect table boxes, crop them and save for further analysis
 """
 
+#%%
 class MaxResize(object):
     def __init__(self, max_size: int = 800):
         self.max_size = max_size
@@ -340,7 +465,7 @@ class MaxResize(object):
         resized_image = image.size((int(round(scale * width)), int(round(scale * height))))
         return resized_image
     
-
+#%%
 detection_transform = transforms.Compose([MaxResize(800),
                                           transforms.ToTensor(),
                                           transforms.Normalize([0.485, 0.456, 0.406],
@@ -394,7 +519,7 @@ def outputs_to_objects(outputs, img_size, id2label):
     for label, score, bbox in zip(pred_labels, pred_scores, pred_bboxes):
         class_label = id2label[int(label)]
         if class_label != "no object":
-            objects.append({"label". class_label,
+            objects.append({"label": class_label,
                             "score": float(score),
                             "bbox": [float(elem) for elem in bbox],
                             }
@@ -440,4 +565,50 @@ def plot_images(image_paths):
     plt.show()
             
             
-        
+for file_path in retrieval_results:
+    detect_and_crop_save_table(file_path)
+    
+    
+image_documents = SimpleDirectoryReader("./table_images/").load_data()
+
+
+#%% 
+"""
+We send all cropped tables in one request and ask GPT4o for a direct
+comparison that cites specific rows or metrics
+"""
+model = "openrouter/free"
+api_key = config("OPENROUTER_API_KEY")
+base_url = config("OPENROUTER_BASEURL")
+client = OpenAI(base_url=base_url, api_key=api_key)
+
+prompt = "Compare Qwen2.5 with Qwen3"
+
+messages = [
+    {
+        "role": "user",
+        "content": (
+            [{"type": "text",
+              "text": prompt
+              }
+             ] +
+            [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{base64.b64encode(open(img.image_path, "rb").read()).decode('utf-8')}"
+                    }
+                },
+                for img in image_documents
+            ]
+        )
+    }
+]
+    
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    max_tokens=1000
+)
+
+print(response.choices[0].message.content)
