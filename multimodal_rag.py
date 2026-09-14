@@ -27,7 +27,8 @@ from llama_index.core import (ServiceContext, SimpleDirectoryReader,
                               )
 from llama_index.core.schema import (ImageDocument,
                                      ImageNode,
-                                     Document
+                                     Document,
+                                     NodeWithScore
                                      )
 from llama_index.core.response.notebook_utils import display_source_node
 from llama_index.llms.openai import OpenAI as OpenAIIndex
@@ -462,7 +463,7 @@ class MaxResize(object):
         width, height = image.size
         current_max_size = max(width, height)
         scale = self.max_size / current_max_size
-        resized_image = image.size((int(round(scale * width)), int(round(scale * height))))
+        resized_image = image.resize((int(round(scale * width)), int(round(scale * height))))
         return resized_image
     
 #%%
@@ -482,17 +483,18 @@ structure_transform = transforms.Compose([
                          [0.229, 0.224, 0.225])
 ])
 
-
+#%%
 model = AutoModelForObjectDetection.from_pretrained(
     "microsoft/table-transformer-detection",
     revision="no_timm"
 ).to("cuda" if torch.cuda.is_available() else "cpu")
 
+#%%
 structure_model = AutoModelForObjectDetection.from_pretrained(
     "microsoft/table-transformer-structure-recognition-v1.1-all"
 ).to("cuda" if torch.cuda.is_available() else "cpu")
 
-
+#%%
 def box_cxcywh_to_xyxy(x: Tensor):
     x_c, y_c, w, h = x.unbind(-1)
     b = [(x_c - 0.5 * w), (y_c - 0.5 * h), (x_c + 0.5 * w), (y_c + 0.5 * h)]
@@ -530,10 +532,12 @@ def outputs_to_objects(outputs, img_size, id2label):
 def detect_and_crop_save_table(file_path,
                                cropped_table_directory = "./table_images/"
                                ):
+    if isinstance(file_path, NodeWithScore):
+        file_path = file_path.metadata.get("image_path")
     image = PILImage.open(file_path)
     filename, _ = os.path.splitext(os.path.basename(file_path))
     os.makedirs(cropped_table_directory, exist_ok=True)
-    pixel_values = detection_transform(image).unsequeeze(0).to(model.device)
+    pixel_values = detection_transform(image).to(model.device)
     
     with torch.no_grad():
         outputs = model(pixel_values)
@@ -547,7 +551,7 @@ def detect_and_crop_save_table(file_path,
         cropped_table = image.crop(obj["bbox"])
         cropped_table.save(os.path.join(cropped_table_directory, f"{filename}_{idx}.png"))
         
-        
+#%%        
 def plot_images(image_paths):
     images_shown = 0
     plt.figure(figsize=(16, 9))
@@ -564,11 +568,11 @@ def plot_images(image_paths):
     plt.tight_layout()
     plt.show()
             
-            
+#%%            
 for file_path in retrieval_results:
     detect_and_crop_save_table(file_path)
     
-    
+#%%    
 image_documents = SimpleDirectoryReader("./table_images/").load_data()
 
 
@@ -577,34 +581,39 @@ image_documents = SimpleDirectoryReader("./table_images/").load_data()
 We send all cropped tables in one request and ask GPT4o for a direct
 comparison that cites specific rows or metrics
 """
+
+#%%
 model = "openrouter/free"
 api_key = config("OPENROUTER_API_KEY")
 base_url = config("OPENROUTER_BASEURL")
 client = OpenAI(base_url=base_url, api_key=api_key)
 
+#%%
 prompt = "Compare Qwen2.5 with Qwen3"
+
+import base64
 
 messages = [
     {
         "role": "user",
-        "content": (
-            [{"type": "text",
-              "text": prompt
-              }
-             ] +
-            [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{base64.b64encode(open(img.image_path, "rb").read()).decode('utf-8')}"
-                    }
-                },
-                for img in image_documents
-            ]
-        )
+        "content": [
+            # 1. FIXED: Removed the extra outer brackets to make it a flat list item
+            {
+                "type": "text",
+                "text": prompt
+            }
+        ] + [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{base64.b64encode(open(img.image_path, 'rb').read()).decode('utf-8')}"
+                }
+            } # 2. FIXED: Removed the invalid trailing comma right before the loop declaration
+            for img in image_documents
+        ]
     }
 ]
-    
+
 response = client.chat.completions.create(
     model=model,
     messages=messages,
@@ -612,3 +621,4 @@ response = client.chat.completions.create(
 )
 
 print(response.choices[0].message.content)
+# %%
