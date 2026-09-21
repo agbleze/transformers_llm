@@ -15,6 +15,56 @@ from ray import tune
 from ray.tune import Tuner
 from ray.tune.schedulers.async_hyperband import ASHAScheduler
 import ray
+from glob import glob
+import logging
+import uuid
+
+#%%
+
+from ray.tune.schedulers import ASHAScheduler
+from ray.air.config import RunConfig, CheckpointConfig
+#%%
+
+logging.getLogger("ray").setLevel(logging.ERROR)
+os.environ["RAY_TRAIN_ENABLE_V2_MIGRATION_WARNINGS"] = "0"
+os.environ["RAY_CLUSTER_NAME"] = "local"
+#os.environ["RAY_ADDRESS"] = "localhost:6379"
+os.environ["RAY_TMPDIR"] = "/tmp/ray_native"
+os.environ["RAY_STORAGE"] = "/mnt/d/ray_spill/tune_results"
+os.environ["RAY_DATA_CACHE_DIR"] = "/mnt/d/ray_spill/data_cache"
+
+# 2. Add these to disable the broken WSL internal state health checks
+os.environ["RAY_ENABLE_STATE_API"] = "0"
+os.environ["RAY_TRAIN_ENABLE_MONITORING"] = "0"
+
+os.environ["RAY_AIR_NEW_OUTPUT"] = "0"
+
+ray.init(
+    #address="local",
+    
+    _temp_dir="/tmp/ray_native",
+    
+    
+    # 2. OFFLOAD THE HEAVY WEIGHTS: Large arrays spill to your D: drive
+    _system_config={
+        "object_spilling_config": '{"type": "filesystem", "params": {"directory_path": ["/mnt/d/ray_spill"]}}'
+    },
+    
+    include_dashboard=False,
+    # 3. CODE REPOSITORY: Points to your external storage directory
+    #runtime_env={"working_dir": "/mnt/d/data_store/distributed_work"}
+)
+
+
+
+#%%
+
+working_dir = "/mnt/d/data_store/distributed_work"
+
+#os.listdir(data_store)
+
+glob(f"{working_dir}/*")
+
 
 # %%
 use_gpu = True
@@ -55,7 +105,7 @@ ray_datasets
 
 def tokenize_fn(batch):
     premises = batch["premise"]
-    hypothesis = batch["hypothesis"]
+    hypotheses = batch["hypothesis"]
     labels = batch["label"]
     
     premises = premises.tolist() if isinstance(premises, np.ndarray) else premises
@@ -99,7 +149,7 @@ def train_func(config):
                                             collate_fn=tokenize_fn
                                             )
     args = TrainingArguments(name, eval_strategy="epoch",
-                             save_strategy="epoch",
+                             save_strategy="no",
                              logging_strategy="epoch",
                              per_device_train_batch_size=config.get("batch_size", 64),
                              per_device_eval_batch_size=config.get("batch_size", 64),
@@ -133,7 +183,10 @@ def train_func(config):
     eval_metrics = trainer.evaluate()
     print(f"Final evaluation:", eval_metrics)
     
-    output_dir = os.path.join(ray.train.get_context().get_trial_dir(), "hf_model")
+    unique_id = str(uuid.uuid4())[:8]
+    output_dir = f"/mnt/d/ray_spill/scratch_checkpoints/{unique_id}/hf_model"
+    os.makedirs(output_dir, exist_ok=True)
+    
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     
@@ -142,51 +195,123 @@ def train_func(config):
                       },
                      checkpoint=Checkpoint.from_directory(output_dir)
                      )
+    ray.tune.report(metrics=eval_metrics, checkpoint=Checkpoint.from_directory(output_dir))
     
 
 # %% setup torchtrainer
-trainer = TorchTrainer(train_func,
+ray_trainer = TorchTrainer(train_loop_per_worker=train_func,
                        scaling_config=ScalingConfig(num_workers=num_workers,
                                                     use_gpu=use_gpu,
                                                     ),
                        datasets = {"train": ray_datasets["train"],
                                    "eval": ray_datasets["validation"]
                                    },
-                       run_config=RunConfig(checkpoint_config=CheckpointConfig(num_to_keep=1,
-                                                                               checkpoint_score_attribute="eval_boss",
-                                                                               checkpoint_score_order="min",
-                                                                               )
-                                            )
+                    #    run_config=RunConfig(checkpoint_config=CheckpointConfig(num_to_keep=1,
+                    #                                                            checkpoint_score_attribute="eval_loss",
+                    #                                                            checkpoint_score_order="min",
+                    #                                                            )
+                    #                         )
                        )
 
+
+#%%
+
+#ray_trainer.fit()
+
+trainable_with_datasets = tune.with_parameters(
+    train_func,
+    # This matches the dataset shard extraction lines inside your train_func!
+    # They will be injected transparently into the workers
+    datasets={
+        "train": ray_datasets["train"],
+        "eval": ray_datasets["validation"]
+    }
+)
+
+trainable_with_resources = tune.with_resources(
+    trainable_with_datasets,
+    resources={"cpu": num_workers, "gpu": 1 if use_gpu else 0}
+)
+
+
 #%% tune hyperparameters
-tuner = Tuner(trainer,
-              param_space={"train_loop_config": {
-                  "learning_rate": tune.grid_search([2e-5, 2e-4, 2e-3, 2e-2]),
-                  "epochs": tune.choice([2, 4, 6, 8]),
-                  "batch_size": tune.choice([16, 32, 64, 128]),
-                  "weight_decay": tune.grid_search([0.0, 0.01, 0.1, 0.001])
-              }
+import warnings
+from ray.train import CheckpointConfig, RunConfig, SyncConfig
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="ray")
+
+
+# custom_checkpoint_config = CheckpointConfig()
+
+# # 2. Bypass __post_init__ loops by injecting properties directly into the object's attributes!
+# custom_checkpoint_config.num_to_keep = 1
+# custom_checkpoint_config.checkpoint_score_attribute = "eval_loss"
+# custom_checkpoint_config.checkpoint_score_order = "min"
+# custom_checkpoint_config.checkpoint_frequency = None
+# # 3. This satisfies Tune's requirement without triggering Train's deprecation exception!
+# custom_checkpoint_config.checkpoint_at_end = False
+
+
+# custom_sync_config = SyncConfig(sync_period=300,
+#                                 sync_timeout=1800
+#                             )
+
+
+# tuner_run_config = RunConfig(name="tune_transformers",
+#                             #verbose=1,
+#                             checkpoint_config=custom_checkpoint_config,
+#                             storage_path="/mnt/d/ray_spill/tune_results",
+#                             )
+
+# tuner_run_config.sync_config = custom_sync_config
+
+tuner = Tuner(trainable_with_resources,
+              param_space={
+                    "learning_rate": tune.grid_search([2e-5, 2e-4, 2e-3, 2e-2]),
+                    "epochs": tune.choice([2, 4, 6, 8]),
+                    "batch_size": tune.choice([16, 32, 64, 128]),
+                    "weight_decay": tune.grid_search([0.0, 0.01, 0.1, 0.001])
+            
             },
             tune_config=tune.TuneConfig(
                 metric="eval_loss",
                 mode="min",
                 num_samples=1,
-                scheduler=ASHAScheduler(max_t=max([2, 4, 6, 8]),
+                scheduler=ASHAScheduler(max_t=8, #max([2, 4, 6, 8]),
                                         grace_period=1,
                                         reduction_factor=2
                                         ),
             ),
             run_config=RunConfig(
-                name="tune_transformers",
-                checkpoint_config=CheckpointConfig(
+                                name="tune_transformers",
+                                storage_path="/mnt/d/ray_spill/tune_results", # Massively protects local WSL storage
+                                checkpoint_config=CheckpointConfig(
+                                    num_to_keep=1, 
+                                    checkpoint_score_attribute="eval_loss",
+                                    checkpoint_score_order="min"
+                                ),
+                            ),
+
+            
+            )
+
+#tuner_run_config.sync_config = custom_sync_config
+
+"""
+CheckpointConfig(
                     num_to_keep=1, 
                     checkpoint_score_attribute="eval_loss",
                     checkpoint_score_order="min",
+                    checkpoint_at_end=False
                 )
+                
+                
+RunConfig(
+                name="tune_transformers",
+                #verbose=1,
+                checkpoint_config=custom_checkpoint_config,
+                storage_path="/mnt/d/ray_spill/tune_results",
             ),
-            )
-
+"""
 
 #%%
 
