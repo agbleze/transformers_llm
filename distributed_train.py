@@ -240,30 +240,6 @@ from ray.train import CheckpointConfig, RunConfig, SyncConfig
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="ray")
 
 
-# custom_checkpoint_config = CheckpointConfig()
-
-# # 2. Bypass __post_init__ loops by injecting properties directly into the object's attributes!
-# custom_checkpoint_config.num_to_keep = 1
-# custom_checkpoint_config.checkpoint_score_attribute = "eval_loss"
-# custom_checkpoint_config.checkpoint_score_order = "min"
-# custom_checkpoint_config.checkpoint_frequency = None
-# # 3. This satisfies Tune's requirement without triggering Train's deprecation exception!
-# custom_checkpoint_config.checkpoint_at_end = False
-
-
-# custom_sync_config = SyncConfig(sync_period=300,
-#                                 sync_timeout=1800
-#                             )
-
-
-# tuner_run_config = RunConfig(name="tune_transformers",
-#                             #verbose=1,
-#                             checkpoint_config=custom_checkpoint_config,
-#                             storage_path="/mnt/d/ray_spill/tune_results",
-#                             )
-
-# tuner_run_config.sync_config = custom_sync_config
-
 tuner = Tuner(trainable_with_resources,
               param_space={
                     "learning_rate": tune.grid_search([2e-5, 2e-4, 2e-3, 2e-2]),
