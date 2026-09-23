@@ -61,7 +61,6 @@ ray.init(
 
 working_dir = "/mnt/d/data_store/distributed_work"
 
-#os.listdir(data_store)
 
 glob(f"{working_dir}/*")
 
@@ -130,6 +129,7 @@ validation_key = ("validation")
 name = f"{model_name}-finetuned-{task}"
 
 max_steps_per_epoch = ray_datasets["train"].count() // (batch_size * num_workers)
+
 
 def train_func(config):
     print(f"CUDA available: {torch.cuda.is_available()}")
