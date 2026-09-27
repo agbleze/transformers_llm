@@ -5,6 +5,7 @@ import os
 from ray import train, tune
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.search.optuna import OptunaSearch
+from ray.air.config import RunConfig
 import evaluate
 import numpy as np
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, TrainingArguments, Trainer, pipeline
@@ -234,3 +235,25 @@ config = {"batch_size": tune.choice([4,8,16]),
 
 def main(config):
     storage_path = "/mnt/d/distributed_work/cluster_storage/ray-results"
+    os.makedirs(storage_path, exist_ok=True)
+    scheduler = ASHAScheduler(time_attr="training_iteration",
+                              max_t=config.get("epochs"),
+                              grace_period=2,
+                              reduction_factor=2
+                              )
+    
+    tuner = tune.Tuner(trainable=tune.with_resources(trainable=tune.with_parameters(train_model),
+                                           resources={"cpu": config.get("cpu"),
+                                                      "gpu": config.get("gpu")
+                                                      }
+                                           ),
+                       tune_config=tune.TuneConfig(metric="loss",
+                                                   mode="min",
+                                                   scheduler=scheduler,
+                                                   num_samples=-1
+                                                   ),
+                       run_config=RunConfig(name=f"{config.get('dataset_name')}_tune_demo",
+                                            storage_path=storage_path
+                                            )
+        
+    )
