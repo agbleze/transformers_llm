@@ -7,11 +7,12 @@ from ray.tune.schedulers import ASHAScheduler
 from ray.tune.search.optuna import OptunaSearch
 import evaluate
 import numpy as np
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, TrainingArguments
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, TrainingArguments, Trainer, pipeline
 import transformers
 import torch
-
+from collections import namedtuple
 dataset = load_dataset("legacy-datasets/banking77")
+device = "cuda"
 # %%
 print(dataset)
 # %%
@@ -106,3 +107,130 @@ for b in train_data.iter_batches(batch_size=4):
 for b in ray_train_from_hf_data.iter_torch_batches(batch_size=4, collate_fn=tokenize_batch):
     print(b)
     break
+
+#%%
+
+evaluate.list_evaluation_modules()
+# %%
+metric = evaluate.load("accuracy")
+
+#%%
+
+metric.data
+# %%
+def compute_metric(eval_pred, metric_fn):
+    predictions, labels = eval_pred
+    preds = np.argmax(predictions, axis=1)
+    return metric_fn.compute(predictions=preds, references=labels)
+# %%
+
+exp_eval = {"pred": [[1,2,3,4,5]], "label": [[1,2,3,3,4]]}
+
+
+exp_eval.values
+#%%
+compute_metric(eval_pred=exp_eval.values(), metric_fn=metric)
+# %%
+model = AutoModelForSequenceClassification.from_pretrained(model_name, 
+                                                           use_safetensors=True,
+                                                           num_labels=77
+                                                           )
+# %%
+dummy_inputs = model.dummy_inputs
+dummy_inputs = {k: v.to(device) for k,v in dummy_inputs.items()}
+# %%
+model(**dummy_inputs)
+# %%
+model.num_labels
+# %%
+classifier = pipeline("text-classification",model=model, tokenizer=tokenizer)
+# %%
+exptest ="my card failed"
+
+pred_trial = classifier(exptest)
+# %%
+
+input_token_ids = tokenizer(exptest,return_tensors="pt", padding="longest", max_length=128,
+                            truncation=True
+                            )
+
+input_token_ids = {k: v.to(device) for k,v in input_token_ids.items()}
+# %%
+with torch.no_grad():
+    outputs = model(**dummy_inputs)
+# %%
+outputs
+# %%
+torch.argmax(outputs.logits, dim=-1)
+# %%
+dummy_batch_size = dummy_inputs["input_ids"].shape[0]
+# %%
+mock_labels = torch.randint(low=0, high=3, size=(dummy_batch_size,))
+# %%
+np.argmax(mock_labels)
+# %%
+EvalPred = namedtuple("EvalPred", ["predictions", "label_ids"])
+# %%
+# %%
+pred_payload = EvalPred(predictions=outputs.logits.cpu().numpy(),label_ids=mock_labels)
+# %%
+compute_metric(eval_pred=pred_payload, metric_fn=metric)
+
+#%%
+
+train_data_iter = train_data.iter_torch_batches(batch_size=32, collate_fn=tokenize_batch)
+
+#%%
+
+for b in train_data_iter:
+    print(b)
+    break
+# %%
+def train_model(config):
+    model_name = config.get("model_name")
+    dataset_name = config.get("dataset_name")
+    device = config.get("device")
+    batch_size = config.get("batch_size")
+    dataset = load_dataset(dataset_name)
+    name = f"trial-{dataset_name}-{model_name}-finetuned"
+    
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    
+    model = AutoModelForSequenceClassification.from_pretrained(model_name)
+    train_data = ray.data.from_items(dataset["train"].to_list())
+    test_data = ray.data.from_items(dataset["test"].to_list())
+    
+    train_data_iterable = train_data.iter_torch_batches(batch_size=batch_size, collate_fn=tokenize_batch)
+    test_data_iterable = test_data.iter_torch_batches(batch_size=batch_size, collate_fn=tokenize_batch)
+    
+    args = TrainingArguments(num_train_epochs=config.get("epochs"),
+                             per_device_train_batch_size=batch_size,
+                             per_device_eval_batch_size=batch_size,
+                             learning_rate=config.get("learning_rate"),
+                             lr_scheduler_type=config.get("lr_scheduler_type"),
+                             optim=config.get("optim"),
+                             eval_strategy="epoch",
+                             save_strategy="best",
+                             enable_jit_checkpoint=True,
+                             )
+    trainer = Trainer(model=model,
+                      args=args,
+                      train_dataset=train_data_iterable,
+                      eval_dataset=test_data_iterable,
+                      )
+    
+
+
+config = {"batch_size": tune.choice([4,8,16]),
+          "learning_rate": tune.loguniform(1e-5, 1e-1),
+          "learning_rate": tune.choice(categories=["linear", "cosine", "constant", "constant_with_warmup"]),
+          "optim": tune.choice(categories=["adamw_torch", "adamw_hf", "sgd", "adafactor"]),
+          "dataset_name": "legacy-datasets/banking77",
+          "model_name": "microsoft/deberta-v3-small",
+          "device": "cuda",
+          "epochs":10,
+          }
+
+
+def main(config):
+    storage_path = "/mnt/d/distributed_work/cluster_storage/ray-results"
