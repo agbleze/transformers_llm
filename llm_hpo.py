@@ -252,6 +252,7 @@ def train_model(config):
                              save_strategy="best",
                              metric_for_best_model="accuracy",
                              max_steps=max_step,
+                             weight_decay=config.get("weight_decay"),
                              #enable_jit_checkpoint=True,
                              )
     trainer = Trainer(model=model,
@@ -280,14 +281,16 @@ config = {"batch_size": tune.choice([4,8,16]),
           "learning_rate": tune.loguniform(1e-5, 1e-1),
           "lr_scheduler_type": tune.choice(categories=["linear", "cosine", "constant", "constant_with_warmup"]),
           "optim": tune.choice(categories=["adamw_torch", "sgd", "adafactor"]),
+          "weight_decay": tune.uniform(lower=0.01, upper=0.1),
           "dataset_name": "legacy-datasets/banking77",
           "model_name": "microsoft/deberta-v3-small",
           "device": "cuda",
-          "epochs":10,
+          "epochs":3,
           "cpu": 2,
           "gpu": 0.33
           }
 
+optuna_search = OptunaSearch(metric="loss", mode="min")
 #%%
 def main(config):
     storage_path = "/mnt/d/distributed_work/cluster_storage/ray-results"
@@ -307,7 +310,8 @@ def main(config):
                        tune_config=tune.TuneConfig(metric="eval_loss",
                                                    mode="min",
                                                    scheduler=scheduler,
-                                                   num_samples=1
+                                                   num_samples=3,
+                                                   search_alg=optuna_search,
                                                    ),
                        run_config=RunConfig(name=f"{config.get('dataset_name')}_tune_demo",
                                             storage_path=storage_path
@@ -319,8 +323,8 @@ def main(config):
     results = tuner.fit()
     print(f"successfully fitted tuner")
     best_result = results.get_best_result(metric="loss", mode="min")
-    print(f"Best Validation loss: {best_result.metrics['loss']}")
-    print(f"Best validation acczracy: {best_result.metrics['accuracy']}")
+    print(f"Best Validation loss: {best_result.metrics['eval_loss']}")
+    print(f"Best validation accuracy: {best_result.metrics['eval_accuracy']}")
     
     return results, best_result
 
@@ -329,8 +333,6 @@ def main(config):
 ray.init(
     ignore_reinit_error=True,
     _temp_dir="/tmp/ray_native",
-    
-    
     # 2. OFFLOAD THE HEAVY WEIGHTS: Large arrays spill to your D: drive
     _system_config={
         "object_spilling_config": '{"type": "filesystem", "params": {"directory_path": ["/mnt/d/ray_spill"]}}'
@@ -338,4 +340,6 @@ ray.init(
     
 )
 res = main(config)
+# %%
+res[1]
 # %%
